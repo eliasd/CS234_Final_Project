@@ -4,7 +4,7 @@
 # same, and the step function returns s'
 # this doesn't need to be defined within the
 # class below.
-state_space_features = ['input_x_features', 
+STATE_SPACE_FEATURES = ['input_x_features', 
 						'past_local_predict', 
 						'past_cloud_predict', 
 						'past_local_tdiff', 
@@ -17,7 +17,11 @@ class OffloadEnv:
 		Initialize the environment.
 	"""
 
-	def __init__(self):
+	def __init__(self, facenet_data_csv=FACENET_DATA_CSV):
+		# Environment Data
+		#####################
+		self.SVM_results_df = pandas.read_csv(facenet_data_csv)
+
 		## Reward Parameters.
 		######################
 		# These are the alpha and beta parameters that are 
@@ -70,6 +74,18 @@ class OffloadEnv:
 		allowed_action = self.action_to_numeric_dict[allowed_action_name]
 
 		# Propogate to the next state given the action we're taking.
+		if allowed_action_name == 'past_local':
+			# TODO update prediction, update features (whatever we decide they should be)
+		elif allowed_action_name == 'past_cloud':
+			# TODO update prediction, update features, decrement queries left !
+		elif allowed_action_name == 'query_local':
+			# TODO update prediction, update features,
+			# we want a vector with the local prediction, and the confidence of our prediction.
+			# will look like this: curr_edge_prediction_vec = [self.edge_prediction_vec[self.t], self.edge_confidence_vec[self.t]]
+
+			# update st
+		elif allowed_action_name == 'query_cloud':
+
 
 		# Compute reward given the current state and action.
 
@@ -77,7 +93,32 @@ class OffloadEnv:
 
 
 	def _reset(self):
-		pass
+		# Reset timestep.
+		self.t = 0
+
+		# Sample a new timeseries episode.
+		# 
+		timeseries = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, 
+											  T=T, 
+											  coherence_time=coherence_time, 
+											  P_SEEN=0.6, 
+											  train_test_membership=train_test)
+
+		# Budget of queries for cloud and edge model.
+		self.query_budget = 10
+		self.num_queries_remain = self.query_budget
+
+		# Max Timestep in the sampled timeseries
+		self.T = len(timeseries[query_ts])
+
+		# Initialize the initial state.
+		# The current state values are maintained within a dictionary.
+		self.state_dict = get_initial_state(...)
+
+		state = state_dict_to_state_vec(order_list=STATE_SPACE_FEATURES, state_dict=self.state_dict)
+		return state
+
+
 
 
 
