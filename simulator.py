@@ -1,24 +1,63 @@
-# Create list representation of state space,
-# features as defined in equation (3). Note
-# that because our initial state is always the
-# same, and the step function returns s'
-# this doesn't need to be defined within the
-# class below.
-STATE_SPACE_FEATURES = ['input_x_features', 
+
+# Note: we can experiment with different features 
+# 		(that is, Phi(x)) of the problem sensory input x.
+# 		so we create multiple state space feature lists.	
+
+# This state space uses the SVM feature encoding from the database
+# of the current input, as the sensory input features.
+STATE_SPACE_FEATURES_1 = ['curr_input_x_embeddings', 
 						'past_local_predict', 
 						'past_cloud_predict', 
 						'past_local_tdiff', 
 						'past_cloud_tdiff', 
-						'num_queries_left',  
+						'num_cloud_queries_left',  
 						'time_left']
 
-## Utils:
+# This state space uses the vector difference between the 
+# SVM feature embeddings of the current input x_t and the 
+# SVM feature embeddings of the previous input x_t-1.
+STATE_SPACE_FEATURES_2 = ['curr_input_x_diff', 
+						'past_local_predict', 
+						'past_cloud_predict', 
+						'past_local_tdiff', 
+						'past_cloud_tdiff', 
+						'num_cloud_queries_left',  
+						'time_left']
 
-def get_initial_state(curr_query_x=0, past_local_predict=0, past_local_confidence=0
-					  past_cloud_predict=0, num_cloud_queries_remain=0):
+## Utils Functions:
+
+def state_dict_to_state_vec(state_dict, order_list):
+	state_vec = []
+	for key in order_list:
+		if key == 'curr_input_x_embeddings':
+			# 'curr_input_x_embeddings' maps to a 
+			# np.array of SVM embeddings.
+			embeddings_list = list(state_dict[key])
+			state_vec += embeddings_list
+		else:
+			# All other state space features are numeric values.
+			state_vec.append(state_dict[key])
+
+def get_initial_state(curr_input_x_features, past_local_predict, past_local_confidence
+					  past_cloud_predict, num_cloud_queries_left):
 	state_dict = {}
-	state_dict['curr_query_x'] = curr_query_x
-	state_dict['curr_']
+	
+	# np.array of SVM embeddings for input x.
+	state_dict['curr_input_x_features'] = curr_input_x_features		
+	# Difference between SVM embeddings for curr input x 
+	# and input at previous timestep.
+	state_dict['curr_input_x_diff'] = 0.0					# 
+
+	state_dict['past_local_predict'] = past_local_predict
+	# state_dict['past_local_conf'] = past_local_confidence
+
+	state_dict['past_cloud_predict'] = past_cloud_predict
+
+	state_dict['past_local_tdiff'] = 0
+	state_dict['past_cloud_tdiff'] = 0
+	state_dict['num_cloud_queries_left'] = num_cloud_queries_left
+
+	return state_dict
 
 class OffloadEnv:
 	"""
@@ -44,10 +83,10 @@ class OffloadEnv:
 		# re-use past query results, the next two are fixed 
 		# values from the paper for now but can be parameterized later.
 		self.query_cost_dict = {}
-		self.query_cost_dict[0] = 0.0
-		self.query_cost_dict[1] = 0.0
-		self.query_cost_dict[2] = 1.0
-		self.query_cost_dict[3] = 5.0
+		self.query_cost_dict[0] = 0.0	# past local
+		self.query_cost_dict[1] = 0.0	# past cloud
+		self.query_cost_dict[2] = 1.0	# query local
+		self.query_cost_dict[3] = 5.0 	# query cloud
 
 		# TODO: Check out if seed is necessary.
 
@@ -101,7 +140,7 @@ class OffloadEnv:
 		# Return next state, reward, whether we are done, info dict.
 
 
-	def _reset(self):
+	def _reset(self, coherence_time=8, P_SEEN=0.6, T=80, CURR_STATE_SPACE_FEATURES=STATE_SPACE_FEATURES_1):
 		# Reset timestep.
 		self.t = 0
 
@@ -110,41 +149,46 @@ class OffloadEnv:
 		# about the time series:
 		#
 		# - local_prediction_vec: [prediction(x_1), ..., prediction(x_T)]
-		#	 	list of class prediction numerics from the local model.
+		#	 	List of class prediction numerics from the local model.
 		# - local_confidence_vec: [conf(prediction(x_1)), ..., conf(prediction(x_T))]
-		#		list of corresponding confidences
-		# - cloud_prediction_vec: 
+		#		List of corresponding confidences to the local model predictions.
+		# - cloud_prediction_vec: [prediction(x_1), ..., prediction(x_T)]
+		#		List of class prediction numerics from the cloud model.
 		#     	Note: the confidence of the cloud model is assumed to be 100%.
-		# - true_value_vec
+		# - query_ts: [phi(x_1), ..., phi(x_T)] 
+		# 		List of input SVM feature embeddings for each input at 
+		# 		each timestep, over timeseries.
+		# - true_value_vec: 
+		#		List of true class label numerics.
 		# - edge_cloud_accuracy_gap_vec
-		# - query_ts: [phi(x_1), ..., phi(x_T)] (list of inputs over timeseries)
 		# - seen_vec
 		# - rolling_diff_vec
 		# - image_name_vec
 		# - train_test_membership
 		# - embeding_norm_vec
-		timeseries = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, 
-											  T=T, 
-											  coherence_time=coherence_time, 
-											  P_SEEN=0.6, 
-											  train_test_membership=train_test)
+		timeseries_dict = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, 
+												   T=T, 
+												   coherence_time=coherence_time, 
+												   P_SEEN=P_SEEN, 
+											  	   train_test_membership=train_test)
 
 		# Budget of queries for cloud model.
 		self.query_budget = 10
-		self.num_cloud_queries_remain = self.query_budget
+		self.num_cloud_queries_left = self.query_budget
 
 		# Max Timestep in the sampled timeseries
 		self.T = len(timeseries['query_ts'])
 
 		# Initialize the initial state.
 		# The current state values are maintained within a dictionary.
-		self.state_dict = get_initial_state(curr_query_x=self.query_ts[self.t],
+		self.state_dict = get_initial_state(curr_input_x_features=self.query_ts[self.t],
 											past_local_predict=self.local_prediction_vec[self.t],
 											past_local_confidence=self.local_confidence_vec[self.t],
 											past_cloud_predict=self.cloud_prediction_vec[self.t],
-											num_cloud_queries_remain=self.num_cloud_queries_remain)
+											num_cloud_queries_left=self.num_cloud_queries_left)
 
-		state = state_dict_to_state_vec(order_list=STATE_SPACE_FEATURES, state_dict=self.state_dict)
+		state = state_dict_to_state_vec(order_list=CURR_STATE_SPACE_FEATURES, state_dict=self.state_dict)
+
 		return state
 
 
