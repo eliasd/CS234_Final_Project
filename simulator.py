@@ -24,11 +24,29 @@ STATE_SPACE_FEATURES_2 = ['curr_input_x_diff',
 						'num_cloud_queries_left',  
 						'time_left']
 
-## Utils Functions:
+# Includes the additional features:
+# 	- 'past_local_input_x_diff' which is the difference 
+# 	   between the current input x and the last input on 
+# 	   which the local model was queried
+# 	- 'past_cloud_input_x_diff' which is the difference 
+#	   between the current input x and the last input on
+#	   which the cloud model was queried.
+STATE_SPACE_FEATURES_3 = ['curr_input_x_diff',
+						'past_local_input_x_diff',
+						'past_cloud_input_x_diff',
+						'past_local_predict',
+						'past_cloud_predict',
+						'past_local_tdiff',
+						'past_cloud_tdiff',
+						'num_cloud_queries_left',
+						'time_left']
 
-def state_dict_to_state_vec(state_dict, order_list):
+## Utils Functions:
+###################
+
+def state_dict_to_state_vec(state_dict, state_feature_list):
 	state_vec = []
-	for key in order_list:
+	for key in state_feature_list:
 		if key == 'curr_input_x_embeddings':
 			# 'curr_input_x_embeddings' maps to a 
 			# np.array of SVM embeddings.
@@ -38,8 +56,8 @@ def state_dict_to_state_vec(state_dict, order_list):
 			# All other state space features are numeric values.
 			state_vec.append(state_dict[key])
 
-def get_initial_state(curr_input_x_features, past_local_predict, past_local_confidence
-					  past_cloud_predict, num_cloud_queries_left):
+def get_initial_state(curr_input_x_features, past_local_predict, past_local_confidence, 
+						past_cloud_predict, num_cloud_queries_left):
 	state_dict = {}
 	
 	# np.array of SVM embeddings for input x.
@@ -48,16 +66,32 @@ def get_initial_state(curr_input_x_features, past_local_predict, past_local_conf
 	# and input at previous timestep.
 	state_dict['curr_input_x_diff'] = 0.0					# 
 
+	# Local model state information.
+	state_dict['past_local_input_x'] = curr_input_x_features
 	state_dict['past_local_predict'] = past_local_predict
-	# state_dict['past_local_conf'] = past_local_confidence
-
-	state_dict['past_cloud_predict'] = past_cloud_predict
-
+	state_dict['past_local_conf'] = past_local_confidence
+	state_dict['past_local_input_x_diff'] = 0.0
 	state_dict['past_local_tdiff'] = 0
+
+	# Cloud model state information.
+	state_dict['past_cloud_input_x'] = curr_input_x_features
+	state_dict['past_cloud_predict'] = past_cloud_predict
 	state_dict['past_cloud_tdiff'] = 0
+	state_dict['past_cloud_input_x_diff'] = 0.0
 	state_dict['num_cloud_queries_left'] = num_cloud_queries_left
 
+	# Tuple contains the final prediction and corresponding confidence,
+	# which is dependent on the action taken.
+	state_dict['curr_chosen_prediction'] = (None, 0.0)
+
+	# General sensory information.
+	state_dict['time_left'] = self.T - 1
+
 	return state_dict
+
+def distance(curr_input_x_features, prev_input_x_features):
+	diff = curr_input_x_features - prev_input_x_features
+	return np.sqrt(np.sum(np.square(diff)))
 
 class OffloadEnv:
 	"""
@@ -76,7 +110,7 @@ class OffloadEnv:
 		## equation (4) in Sandeep's paper.
 		self.rewards_params_dict = {}
 		self.rewards_params_dict['weight_of_query_cost'] = 1.0
-		self.rewards_params_dict['weight_of_accuracy_cost'] = 10.0
+		self.rewards_params_dict['weight_of_accuracy_cost'] = 10.0j
 
 		# These are the costs of the four available queries
 		# The first two will always have cost zero because they
@@ -103,46 +137,121 @@ class OffloadEnv:
 		self.numeric_to_action_dict = ['past_local', 'past_cloud', 'query_local', 'query_cloud']
 		self.n_a = len(numeric_to_action_dict)
 
+		self.CLOUD_CONF = 1.0 # Cloud confidence is assumed to be 100%.
 
 		## State Space.
 		######################
 		self.n_s = len(state_space_features)
 
 	"""
-	 Implement dynamics: so given (s, a) return (s', reward, done).
+	 Implement dynamics: so given (s, a) return (s', reward, done, info).
 	 Note that action will be numeric.
 	"""
 	def _step(self, action):
 		nominal_action_name = self.numeric_to_action_dict[action]
-		# TODO: implement _get_action_name
-		allowed_action_name = self._get_action_name(nominal_action_name)
-
+		allowed_action_name = self.get_action_name(nominal_action_name)
 		# Get numeric value of action we're allowed to take
-		allowed_action = self.action_to_numeric_dict[allowed_action_name]
+		allowed_action_numeric = self.action_to_numeric_dict[allowed_action_name]
 
-		# Propogate to the next state given the action we're taking.
-		if allowed_action_name == 'past_local':
-			# TODO update prediction, update features (whatever we decide they should be)
-			past_
-		elif allowed_action_name == 'past_cloud':
-			# TODO update prediction, update features, decrement queries left !
-		elif allowed_action_name == 'query_local':
-			# TODO update prediction, update features,
-			# we want a vector with the local prediction, and the confidence of our prediction.
-			# will look like this: curr_edge_prediction_vec = [self.edge_prediction_vec[self.t], self.edge_confidence_vec[self.t]]
-
-			# update st
-		elif allowed_action_name == 'query_cloud':
-
+		# Update state dictionary info, that is action specifc, to the next state.
+		self._propogateState(allowed_action_name)
 
 		# Compute reward given the current state and action.
+		true_output_y = self.timeseries_dict['true_value_vec'][self.t]
+		reward = self._computeReward(allowed_action_numeric, true_output_y)
+
+		# Update timestep, other sensory state info that is not action-specific.
+		self.t += 1
+		self.state_dict['time_left'] -= 1
+
+		done_flag = False
+		if self.t == self.T:
+			done_flag = True
+
+		curr_input_x_features = self.timeseries_dict['query_ts'][self.t]
+		self.state_dict['curr_input_x_features'] = curr_input_x_features
+		prev_input_x_features = self.timeseries_dict['query_ts'][self.t - 1]
+
+		curr_input_x_diff = distance(curr_input_x_features, prev_input_x_features)
+		self.state_dict['curr_input_x_diff'] = curr_input_x_diff
+
+		past_local_input_x = self.state_dict['past_local_input_x']
+		self.state_dict['past_local_input_x_diff'] = distance(curr_input_x_features, past_local_input_x)
+		past_local_cloud_x = self.state_dict['past_cloud_input_x']
+		self.state_dict['past_cloud_input_x_diff'] = distance(curr_input_x_features, past_local_cloud_x)
+
+		self.state_dict['past_local_tdiff'] += 1
+		self.state_dict['past_cloud_tdiff'] += 1
 
 		# Return next state, reward, whether we are done, info dict.
+		next_state_vec = state_dict_to_state_vec(self.state_dict, self.CURR_STATE_SPACE_FEATURES)
+		return next_state_vec, reward, done_flag, {}
 
+	def _propogateState(self, action_name):
+		# Propogate to the next state given the action we're taking.
+		if action_name == 'past_local':
+			# Choose to use past local model prediction.
+			previous_local_predict = self.state_dict['past_local_predict']
+			previous_local_conf = self.state_dict['past_local_conf']
+
+			self.state_dict['curr_chosen_prediction'] = (previous_local_predict, previous_local_conf)
+
+		elif action_name == 'past_cloud':
+			# Choose to use past cloud prediction.
+			previous_cloud_predict = self.state_dict['past_cloud_predict']
+			previous_cloud_conf = self.CLOUD_CONF
+
+			self.state_dict['curr_chosen_prediction'] = (previous_cloud_predict, previous_cloud_conf)
+
+		elif action_nam == 'query_local':
+			# Choose to query the local model.
+			local_prediction_vec = self.timeseries_dict['local_prediction_vec']
+			local_confidence_vec = self.timeseries_dict['local_confidence_vec']
+
+			curr_local_predict = local_prediction_vec[self.t]
+			curr_local_conf = local_confidence_vec[self.t]
+
+			self.state_dict['curr_chosen_prediction'] = (curr_local_predict, curr_local_conf)
+			self.state_dict['past_local_predict'] = curr_local_predict
+			self.state_dict['past_local_conf'] = curr_local_conf
+			self.state_dict['past_local_input_x'] = self.state_dict['curr_input_x_features']
+			self.state_dict['past_local_tdiff'] = 0
+
+		elif action_name == 'query_cloud':
+			# Choose to query the cloud model.
+			cloud_prediction_vec = self.timeseries_dict['cloud_prediction_vec']
+
+			curr_cloud_predict = cloud_prediction_vec[self.t]
+			curr_cloud_conf = self.CLOUD_CONF
+
+			self.state_dict['curr_chosen_prediction'] = (curr_cloud_predict, curr_cloud_conf)
+			self.state_dict['past_cloud_predict'] = curr_cloud_predict
+			self.state_dict['past_cloud_input_x'] = self.state_dict['curr_input_x_features']
+			self.state_dict['past_cloud_tdiff'] = 0
+			self.state_dict['num_cloud_queries_left'] -= 1
+
+	def _computeReward(self, action_numeric, true_output_y):
+		weight_of_query_cost = self.rewards_params_dict['weight_of_query_cost'] = 1.0
+		weight_of_accuracy_cost = self.rewards_params_dict['weight_of_accuracy_cost'] = 10.0j
+
+		query_cost = self.query_cost_dict[action_numeric]
+		accuracy_cost = None
+
+		prediction = self.state_dict['curr_chosen_prediction'][0]
+		if prediction == true_output_y:
+			accuracy_cost = 0.0
+		else:
+			accuracy_cost = 1.0
+
+		reward = -1.0 * weight_of_accuracy_cost * accuracy_cost - weight_of_query_cost * query_cost 
+		return reward
 
 	def _reset(self, coherence_time=8, P_SEEN=0.6, T=80, CURR_STATE_SPACE_FEATURES=STATE_SPACE_FEATURES_1):
 		# Reset timestep.
 		self.t = 0
+
+		# Select the state space definition to use.
+		self.CURR_STATE_SPACE_FEATURES = CURR_STATE_SPACE_FEATURES
 
 		# Sample a new timeseries episode.
 		# timeseries is a dict containing all the relevant info
@@ -166,18 +275,18 @@ class OffloadEnv:
 		# - image_name_vec
 		# - train_test_membership
 		# - embeding_norm_vec
-		timeseries_dict = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, 
-												   T=T, 
-												   coherence_time=coherence_time, 
-												   P_SEEN=P_SEEN, 
-											  	   train_test_membership=train_test)
+		self.timeseries_dict = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, 
+														T=T, 
+														coherence_time=coherence_time, 
+														P_SEEN=P_SEEN, 
+														train_test_membership=train_test)
 
 		# Budget of queries for cloud model.
 		self.query_budget = 10
 		self.num_cloud_queries_left = self.query_budget
 
 		# Max Timestep in the sampled timeseries
-		self.T = len(timeseries['query_ts'])
+		self.T = len(timeseries_dict['query_ts']) - 1
 
 		# Initialize the initial state.
 		# The current state values are maintained within a dictionary.
@@ -187,7 +296,7 @@ class OffloadEnv:
 											past_cloud_predict=self.cloud_prediction_vec[self.t],
 											num_cloud_queries_left=self.num_cloud_queries_left)
 
-		state = state_dict_to_state_vec(order_list=CURR_STATE_SPACE_FEATURES, state_dict=self.state_dict)
+		state = state_dict_to_state_vec(order_list=self.CURR_STATE_SPACE_FEATURES, state_dict=self.state_dict)
 
 		return state
 
