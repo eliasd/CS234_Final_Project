@@ -1,5 +1,9 @@
-from stochastic_timeseries_facenet import facenet_stochastic_video
 import gym
+from gym.utils import seeding
+import pandas as pd
+import random
+import numpy as np
+
 # Note: we can experiment with different features 
 # 		(that is, Phi(x)) of the problem sensory input x.
 # 		so we create multiple state space feature lists.	
@@ -41,68 +45,15 @@ STATE_SPACE_FEATURES_3 = ['curr_input_x_diff',
 						'past_cloud_tdiff',
 						'num_cloud_queries_left',
 						'time_left']
-
-## Utils Functions:
-###################
-
-def state_dict_to_state_vec(state_dict, state_feature_list):
-	state_vec = []
-	for key in state_feature_list:
-		if key == 'curr_input_x_embeddings':
-			# 'curr_input_x_embeddings' maps to a 
-			# np.array of SVM embeddings.
-			embeddings_list = list(state_dict[key])
-			state_vec += embeddings_list
-		else:
-			# All other state space features are numeric values.
-			state_vec.append(state_dict[key])
-
-def get_initial_state(curr_input_x_features, past_local_predict, past_local_confidence, 
-						past_cloud_predict, num_cloud_queries_left):
-	state_dict = {}
-	
-	# np.array of SVM embeddings for input x.
-	state_dict['curr_input_x_features'] = curr_input_x_features		
-	# Difference between SVM embeddings for curr input x 
-	# and input at previous timestep.
-	state_dict['curr_input_x_diff'] = 0.0					# 
-
-	# Local model state information.
-	state_dict['past_local_input_x'] = curr_input_x_features
-	state_dict['past_local_predict'] = past_local_predict
-	state_dict['past_local_conf'] = past_local_confidence
-	state_dict['past_local_input_x_diff'] = 0.0
-	state_dict['past_local_tdiff'] = 0
-
-	# Cloud model state information.
-	state_dict['past_cloud_input_x'] = curr_input_x_features
-	state_dict['past_cloud_predict'] = past_cloud_predict
-	state_dict['past_cloud_tdiff'] = 0
-	state_dict['past_cloud_input_x_diff'] = 0.0
-	state_dict['num_cloud_queries_left'] = num_cloud_queries_left
-
-	# Tuple contains the final prediction and corresponding confidence,
-	# which is dependent on the action taken.
-	state_dict['curr_chosen_prediction'] = (None, 0.0)
-
-	# General sensory information.
-	state_dict['time_left'] = self.T - 1
-
-	return state_dict
-
-def distance(curr_input_x_features, prev_input_x_features):
-	diff = curr_input_x_features - prev_input_x_features
-	return np.sqrt(np.sum(np.square(diff)))
-
 class OffloadEnv(gym.Env):
 	"""
 		Initialize the environment.
 	"""
 
-	def __init__(self, facenet_data_csv=FACENET_DATA_CSV):
+	def __init__(self):
 		# Environment Data
 		#####################
-		self.SVM_results_df = pandas.read_csv(facenet_data_csv)
+		self.SVM_results_df = pd.read_csv('SVM_results.csv')
 
 		## Reward Parameters.
 		######################
@@ -111,7 +62,7 @@ class OffloadEnv(gym.Env):
 		## equation (4) in Sandeep's paper.
 		self.rewards_params_dict = {}
 		self.rewards_params_dict['weight_of_query_cost'] = 1.0
-		self.rewards_params_dict['weight_of_accuracy_cost'] = 10.0j
+		self.rewards_params_dict['weight_of_accuracy_cost'] = 10.0
 
 		# These are the costs of the four available queries
 		# The first two will always have cost zero because they
@@ -136,32 +87,32 @@ class OffloadEnv(gym.Env):
 		self.action_to_numeric_dict['query_cloud'] = 3
 
 		self.numeric_to_action_dict = ['past_local', 'past_cloud', 'query_local', 'query_cloud']
-		self.n_a = len(numeric_to_action_dict)
+		self.n_a = len(self.numeric_to_action_dict)
 
 		self.CLOUD_CONF = 1.0 # Cloud confidence is assumed to be 100%.
 
-		## State Space.
-		######################
-		self.n_s = len(state_space_features)
+		## Seed.
+		#####################
+		self._seed = 22
 
 	"""
 	 Implement dynamics: so given (s, a) return (s', reward, done, info).
 	 Note that action will be numeric.
 	"""
-	def _step(self, action):
+	def step(self, action):
 		nominal_action_name = self.numeric_to_action_dict[action]
 		allowed_action_name = self.get_action_name(nominal_action_name)
 		# Get numeric value of action we're allowed to take
 		allowed_action_numeric = self.action_to_numeric_dict[allowed_action_name]
 
 		# Update state dictionary info, that is action specifc, to the next state.
-		self._propogateState(allowed_action_name)
+		self.propogateState(allowed_action_name)
 
 		# Compute reward given the current state and action.
 		true_output_y = self.timeseries_dict['true_value_vec'][self.t]
-		reward = self._computeReward(allowed_action_numeric, true_output_y)
+		reward = self.computeReward(allowed_action_numeric, true_output_y)
 
-		# Update timestep, other sensory state info that is not action-specific.
+		# Update timestep to the next timestep, other sensory state info that is not action-specific.
 		self.t += 1
 		self.state_dict['time_left'] -= 1
 
@@ -169,17 +120,17 @@ class OffloadEnv(gym.Env):
 		if self.t == self.T:
 			done_flag = True
 
-		curr_input_x_features = self.timeseries_dict['query_ts'][self.t]
-		self.state_dict['curr_input_x_features'] = curr_input_x_features
+		curr_input_x_embeddings = self.timeseries_dict['query_ts'][self.t]
+		self.state_dict['curr_input_x_embeddings'] = curr_input_x_embeddings
 		prev_input_x_features = self.timeseries_dict['query_ts'][self.t - 1]
 
-		curr_input_x_diff = distance(curr_input_x_features, prev_input_x_features)
+		curr_input_x_diff = distance(curr_input_x_embeddings, prev_input_x_features)
 		self.state_dict['curr_input_x_diff'] = curr_input_x_diff
 
 		past_local_input_x = self.state_dict['past_local_input_x']
-		self.state_dict['past_local_input_x_diff'] = distance(curr_input_x_features, past_local_input_x)
+		self.state_dict['past_local_input_x_diff'] = distance(curr_input_x_embeddings, past_local_input_x)
 		past_local_cloud_x = self.state_dict['past_cloud_input_x']
-		self.state_dict['past_cloud_input_x_diff'] = distance(curr_input_x_features, past_local_cloud_x)
+		self.state_dict['past_cloud_input_x_diff'] = distance(curr_input_x_embeddings, past_local_cloud_x)
 
 		self.state_dict['past_local_tdiff'] += 1
 		self.state_dict['past_cloud_tdiff'] += 1
@@ -188,7 +139,16 @@ class OffloadEnv(gym.Env):
 		next_state_vec = state_dict_to_state_vec(self.state_dict, self.CURR_STATE_SPACE_FEATURES)
 		return next_state_vec, reward, done_flag, {}
 
-	def _propogateState(self, action_name):
+	def get_action_name(self, nominal_action_name):
+		action_name = nominal_action_name
+
+		if self.num_cloud_queries_left <= 0:
+			if action_name == 'query_cloud':
+				action_name = 'query_local'
+
+		return action_name
+
+	def propogateState(self, action_name):
 		# Propogate to the next state given the action we're taking.
 		if action_name == 'past_local':
 			# Choose to use past local model prediction.
@@ -204,7 +164,7 @@ class OffloadEnv(gym.Env):
 
 			self.state_dict['curr_chosen_prediction'] = (previous_cloud_predict, previous_cloud_conf)
 
-		elif action_nam == 'query_local':
+		elif action_name == 'query_local':
 			# Choose to query the local model.
 			local_prediction_vec = self.timeseries_dict['local_prediction_vec']
 			local_confidence_vec = self.timeseries_dict['local_confidence_vec']
@@ -215,7 +175,7 @@ class OffloadEnv(gym.Env):
 			self.state_dict['curr_chosen_prediction'] = (curr_local_predict, curr_local_conf)
 			self.state_dict['past_local_predict'] = curr_local_predict
 			self.state_dict['past_local_conf'] = curr_local_conf
-			self.state_dict['past_local_input_x'] = self.state_dict['curr_input_x_features']
+			self.state_dict['past_local_input_x'] = self.state_dict['curr_input_x_embeddings']
 			self.state_dict['past_local_tdiff'] = 0
 
 		elif action_name == 'query_cloud':
@@ -227,13 +187,13 @@ class OffloadEnv(gym.Env):
 
 			self.state_dict['curr_chosen_prediction'] = (curr_cloud_predict, curr_cloud_conf)
 			self.state_dict['past_cloud_predict'] = curr_cloud_predict
-			self.state_dict['past_cloud_input_x'] = self.state_dict['curr_input_x_features']
+			self.state_dict['past_cloud_input_x'] = self.state_dict['curr_input_x_embeddings']
 			self.state_dict['past_cloud_tdiff'] = 0
 			self.state_dict['num_cloud_queries_left'] -= 1
 
-	def _computeReward(self, action_numeric, true_output_y):
+	def computeReward(self, action_numeric, true_output_y):
 		weight_of_query_cost = self.rewards_params_dict['weight_of_query_cost'] = 1.0
-		weight_of_accuracy_cost = self.rewards_params_dict['weight_of_accuracy_cost'] = 10.0j
+		weight_of_accuracy_cost = self.rewards_params_dict['weight_of_accuracy_cost'] = 10.0
 
 		query_cost = self.query_cost_dict[action_numeric]
 		accuracy_cost = None
@@ -246,17 +206,13 @@ class OffloadEnv(gym.Env):
 
 		reward = -1.0 * weight_of_accuracy_cost * accuracy_cost - weight_of_query_cost * query_cost 
 		return reward
-		
-	def _render(self, mode='human', close=False):
-        pass
 
-	def _reset(self, coherence_time=8, P_SEEN=0.6, T=80, CURR_STATE_SPACE_FEATURES=STATE_SPACE_FEATURES_1, train_test = 'TRAIN'):
+	def reset(self, coherence_time=8, P_SEEN=0.6, T=80, STATE_SPACE_FEATURES=STATE_SPACE_FEATURES_1, train_test = 'TRAIN'):
 		# Reset timestep.
 		self.t = 0
-		self.SVM_results_df = pandas.read_csv('SVM_results.csv')
 
 		# Select the state space definition to use.
-		self.CURR_STATE_SPACE_FEATURES = CURR_STATE_SPACE_FEATURES
+		self.CURR_STATE_SPACE_FEATURES = STATE_SPACE_FEATURES
 
 		# Sample a new timeseries episode.
 		# timeseries is a dict containing all the relevant info
@@ -280,28 +236,252 @@ class OffloadEnv(gym.Env):
 		# - image_name_vec
 		# - train_test_membership
 		# - embeding_norm_vec
-		self.local_confidence_vec, self.local_prediction_vec, self.cloud_prediction_vec, self.true_value_vec, self.edge_cloud_accuracy_gap_vec, self.query_ts, self.seen_vec, self.rolling_diff_vec, self.image_name_vec, self.train_test_membership_vec, self.embedding_norm_vec = facenet_stochastic_video(SVM_results_df=, T=T, coherence_time=coherence_time, P_SEEN=P_SEEN, train_test_membership=train_test)
+		self.timeseries_dict = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, T=T, coherence_time=coherence_time, P_SEEN=P_SEEN, train_test_membership=train_test)
 
 		# Budget of queries for cloud model.
 		self.num_cloud_queries_left = 10
 
 		# Max Timestep in the sampled timeseries
-		self.T = len(timeseries_dict['query_ts']) - 1
+		self.T = len(self.timeseries_dict['query_ts']) - 1
 
 		# Initialize the initial state.
 		# The current state values are maintained within a dictionary.
-		self.state_dict = get_initial_state(curr_input_x_features=self.query_ts[self.t],
-											past_local_predict=self.local_prediction_vec[self.t],
-											past_local_confidence=self.local_confidence_vec[self.t],
-											past_cloud_predict=self.cloud_prediction_vec[self.t],
-											num_cloud_queries_left=self.num_cloud_queries_left)
+		self.state_dict = get_initial_state(curr_input_x_embeddings=self.timeseries_dict['query_ts'][self.t],
+											past_local_predict=self.timeseries_dict['local_prediction_vec'][self.t],
+											past_local_confidence=self.timeseries_dict['local_confidence_vec'][self.t],
+											past_cloud_predict=self.timeseries_dict['cloud_prediction_vec'][self.t],
+											num_cloud_queries_left=self.num_cloud_queries_left,
+											final_time_step=self.T)
 
-		state = state_dict_to_state_vec(order_list=self.CURR_STATE_SPACE_FEATURES, state_dict=self.state_dict)
+		state = state_dict_to_state_vec(state_feature_list=self.CURR_STATE_SPACE_FEATURES, state_dict=self.state_dict)
 
 		return state
 
 
+## Utils Functions:
+###################
 
+def state_dict_to_state_vec(state_dict, state_feature_list):
+    state_vec = []
+    for key in state_feature_list:
+        if key == 'curr_input_x_embeddings':
+            # 'curr_input_x_embeddings' maps to a 
+            # np.array of SVM embeddings.
+            embeddings_list = list(state_dict[key])
+            state_vec += embeddings_list
+        else:
+            # All other state space features are numeric values.
+            state_vec.append(state_dict[key])
+
+def get_initial_state(curr_input_x_embeddings, past_local_predict, past_local_confidence, 
+                        past_cloud_predict, num_cloud_queries_left, final_time_step):
+    state_dict = {}
+    
+    # np.array of SVM embeddings for input x.
+    state_dict['curr_input_x_embeddings'] = curr_input_x_embeddings
+    # Difference between SVM embeddings for curr input x 
+    # and input at previous timestep.
+    state_dict['curr_input_x_diff'] = 0.0                   # 
+
+    # Local model state information.
+    state_dict['past_local_input_x'] = curr_input_x_embeddings
+    state_dict['past_local_predict'] = past_local_predict
+    state_dict['past_local_conf'] = past_local_confidence
+    state_dict['past_local_input_x_diff'] = 0.0
+    state_dict['past_local_tdiff'] = 0
+
+    # Cloud model state information.
+    state_dict['past_cloud_input_x'] = curr_input_x_embeddings
+    state_dict['past_cloud_predict'] = past_cloud_predict
+    state_dict['past_cloud_tdiff'] = 0
+    state_dict['past_cloud_input_x_diff'] = 0.0
+    state_dict['num_cloud_queries_left'] = num_cloud_queries_left
+
+    # Tuple contains the final prediction and corresponding confidence,
+    # which is dependent on the action taken.
+    state_dict['curr_chosen_prediction'] = (None, 0.0)
+
+    # General sensory information.
+    state_dict['time_left'] = final_time_step - 1
+
+    return state_dict
+
+def distance(curr_input_x_embeddings, prev_input_x_features):
+    diff = curr_input_x_embeddings - prev_input_x_features
+    return np.sqrt(np.sum(np.square(diff)))
+
+def get_random_uniform(p = 0.5):                                             
+    random.seed()
+    sample = np.random.uniform()                                             
+    
+    if sample <= p:                                                          
+        return True                                                          
+    else:
+        return False    
+
+
+
+def sample_specific_face(train_test_df = None, seen_boolean = None, sampled_face_label = None, seed = None):
+   
+    all_potential_faces_df = train_test_df[train_test_df.true_label_name == sampled_face_label]
+
+    #np.random.seed(seed)
+
+    num_rows = all_potential_faces_df.shape[0]
+
+    random_row_idx = np.random.choice(range(num_rows))
+
+    random_row_df = all_potential_faces_df.iloc[random_row_idx]
+
+    image_name = random_row_df['image_id']
+
+    embedding_vector = np.array([float(x) for x in random_row_df['embedding_vector'].split('_')])
+
+    edge_cloud_accuracy_gap = 1.0 - random_row_df['model_correct']
+
+    edge_prediction = random_row_df['SVM_prediction_numeric']
+    
+    edge_prediction_name = random_row_df['SVM_prediction']
+
+    edge_confidence = random_row_df['SVM_confidence']
+
+    cloud_prediction = random_row_df['true_label_numeric']
+
+    cloud_prediction_name = random_row_df['true_label_name']
+
+    train_test_membership = random_row_df['train_test_membership']
+
+    return image_name, embedding_vector, edge_cloud_accuracy_gap, edge_prediction, edge_confidence, cloud_prediction, train_test_membership, edge_prediction_name, cloud_prediction_name
+
+"""
+    stochastic ts based on facenet
+"""
+
+    # how to create a stochastic timeseries
+    # choose a coherence time
+    # choose from EITHER train or test based on flag
+    # based on P_SEEN, choose from either SEEN or UNKNOWN
+    # for each coherence time, choose a random label from SEEN, UNKNOWN, labels
+    # choose random images for that label for the coherence time
+    # populate edge prediction, edge confidence, cloud and the gap timeseries for all of them
+    # repeat until done
+    
+    # plot, SEEN, UNSEEN, confidence etc timeseries as before
+    # run the all-edge, all-cloud, and rest of benchmarks for the AQE simulator
+    # see how it does on facenet
+
+def facenet_stochastic_video(SVM_results_df = None, T = 200, coherence_time = 10, P_SEEN = 0.7, print_mode = False, seed = None, train_test_membership = 'TRAIN', EMBEDDING_DIM = 128, mini_coherence_time = 3, POISSON_MODE = True):
+
+    edge_confidence_vec = []
+    edge_prediction_vec = []
+    cloud_prediction_vec = []
+    true_value_vec = []
+    edge_cloud_accuracy_gap_vec = []
+    input_vec = []
+    seen_vec = []
+    rolling_diff_vec = []
+    image_name_vec = []
+    train_test_membership_vec = []
+    embedding_norm_vec = []
+
+    np.random.seed(seed)
+
+    train_test_df = SVM_results_df[SVM_results_df['train_test_membership'] == train_test_membership]
+    
+    if print_mode:
+        print('SVM: ', SVM_results_df.shape)
+        print('train_test: ', train_test_df.shape)
+
+    # all faces seen in this df
+    seen_face_names = list(set(train_test_df[train_test_df['seen_unseen'] == 'SEEN']['true_label_name']))
+    unseen_face_names = list(set(train_test_df[train_test_df['seen_unseen'] == 'UNSEEN']['true_label_name']))
+
+    if print_mode:
+        print('seen_face_names: ', seen_face_names)
+        print('unseen_face_names: ', unseen_face_names)
+
+    zero_embedding_vector = np.zeros(EMBEDDING_DIM)
+    past_embedding_vector = zero_embedding_vector
+
+    if POISSON_MODE:
+        empirical_coherence_time = np.random.poisson(coherence_time-1) + 1
+    else:
+        empirical_coherence_time = coherence_time
+
+    for t in range(T):
+        # generate properties for the distro
+        if t % empirical_coherence_time == 0:
+           
+            seen = get_random_uniform(p = P_SEEN)
+            
+            # depending on seen or not, get the face from the appropriate bin
+            if seen:
+                # a sample face
+                sampled_face_label = np.random.choice(seen_face_names)
+            else:
+                # a sample face
+                sampled_face_label = np.random.choice(unseen_face_names)
+
+            if print_mode:
+                print('t: ', t, 'sampled_face: ', sampled_face_label, 'seen: ', seen)
+
+            if POISSON_MODE:
+                empirical_coherence_time = np.random.poisson(coherence_time-1) + 1
+            else:
+                empirical_coherence_time = coherence_time
+            
+            #print('empirical_coherence_time', empirical_coherence_time)
+
+        # for this face, see the feasible images, embeddings, and confidences we can choose from
+        
+        if t % mini_coherence_time == 0:
+            image_name, embedding_vector, edge_cloud_accuracy_gap, edge_prediction, edge_confidence, cloud_prediction, train_test_membership, edge_prediction_name, cloud_prediction_name = sample_specific_face(train_test_df = train_test_df, seen_boolean = seen, sampled_face_label = sampled_face_label, seed = seed)
+
+        if print_mode:
+            print(' ')
+            print('seen: ', seen)
+            print('sampled_label: ', sampled_face_label)
+            print('edge_cloud_accuracy_gap: ', edge_cloud_accuracy_gap)
+            print(' ')
+
+        edge_confidence_vec.append(edge_confidence)
+        input_vec.append(embedding_vector)
+        edge_cloud_accuracy_gap_vec.append(edge_cloud_accuracy_gap)
+        seen_vec.append(seen)
+        train_test_membership_vec.append(train_test_membership)
+
+        edge_prediction_vec.append(edge_prediction)
+        cloud_prediction_vec.append(cloud_prediction)
+
+        # ground-truth is cloud!!
+        true_value_vec.append(cloud_prediction)
+
+        rolling_diff = distance(embedding_vector, past_embedding_vector)
+        #embedding_L2_norm = distance(embedding_vector, zero_embedding_vector) 
+        embedding_L2_norm = np.mean([np.abs(x) for x in embedding_vector])
+
+        # changed embedding vector
+        past_embedding_vector = embedding_vector
+
+        # new colums
+        rolling_diff_vec.append(rolling_diff)
+        image_name_vec.append(image_name)
+        embedding_norm_vec.append(embedding_L2_norm)
+
+    timeseries_dict = {}
+    timeseries_dict['local_prediction_vec'] = edge_prediction_vec
+    timeseries_dict['local_confidence_vec'] = edge_confidence_vec
+    timeseries_dict['cloud_prediction_vec'] = cloud_prediction_vec
+    timeseries_dict['query_ts'] = input_vec
+    timeseries_dict['true_value_vec'] = true_value_vec
+    timeseries_dict['edge_cloud_accuracy_gap_vec'] = edge_cloud_accuracy_gap_vec
+    timeseries_dict['seen_vec'] = seen_vec
+    timeseries_dict['rolling_diff_vec'] = rolling_diff_vec
+    timeseries_dict['image_name_vec'] = image_name_vec
+    timeseries_dict['train_test_membership'] = train_test_membership_vec
+    timeseries_dict['embedding_norm_vec'] = embedding_norm_vec
+
+    return timeseries_dict
 
 
 
