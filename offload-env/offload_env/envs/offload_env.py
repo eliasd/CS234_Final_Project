@@ -1,4 +1,5 @@
-
+from stochastic_timeseries_facenet import facenet_stochastic_video
+import gym
 # Note: we can experiment with different features 
 # 		(that is, Phi(x)) of the problem sensory input x.
 # 		so we create multiple state space feature lists.	
@@ -93,7 +94,7 @@ def distance(curr_input_x_features, prev_input_x_features):
 	diff = curr_input_x_features - prev_input_x_features
 	return np.sqrt(np.sum(np.square(diff)))
 
-class OffloadEnv:
+class OffloadEnv(gym.Env):
 	"""
 		Initialize the environment.
 	"""
@@ -245,10 +246,14 @@ class OffloadEnv:
 
 		reward = -1.0 * weight_of_accuracy_cost * accuracy_cost - weight_of_query_cost * query_cost 
 		return reward
+		
+	def _render(self, mode='human', close=False):
+        pass
 
-	def _reset(self, coherence_time=8, P_SEEN=0.6, T=80, CURR_STATE_SPACE_FEATURES=STATE_SPACE_FEATURES_1):
+	def _reset(self, coherence_time=8, P_SEEN=0.6, T=80, CURR_STATE_SPACE_FEATURES=STATE_SPACE_FEATURES_1, train_test = 'TRAIN'):
 		# Reset timestep.
 		self.t = 0
+		self.SVM_results_df = pandas.read_csv('SVM_results.csv')
 
 		# Select the state space definition to use.
 		self.CURR_STATE_SPACE_FEATURES = CURR_STATE_SPACE_FEATURES
@@ -275,15 +280,10 @@ class OffloadEnv:
 		# - image_name_vec
 		# - train_test_membership
 		# - embeding_norm_vec
-		self.timeseries_dict = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, 
-														T=T, 
-														coherence_time=coherence_time, 
-														P_SEEN=P_SEEN, 
-														train_test_membership=train_test)
+		self.local_confidence_vec, self.local_prediction_vec, self.cloud_prediction_vec, self.true_value_vec, self.edge_cloud_accuracy_gap_vec, self.query_ts, self.seen_vec, self.rolling_diff_vec, self.image_name_vec, self.train_test_membership_vec, self.embedding_norm_vec = facenet_stochastic_video(SVM_results_df=, T=T, coherence_time=coherence_time, P_SEEN=P_SEEN, train_test_membership=train_test)
 
 		# Budget of queries for cloud model.
-		self.query_budget = 10
-		self.num_cloud_queries_left = self.query_budget
+		self.num_cloud_queries_left = 10
 
 		# Max Timestep in the sampled timeseries
 		self.T = len(timeseries_dict['query_ts']) - 1
