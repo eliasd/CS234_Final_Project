@@ -1,5 +1,6 @@
 import gym
 from gym.utils import seeding
+from gym import spaces
 import pandas as pd
 import random
 import numpy as np
@@ -16,7 +17,8 @@ STATE_SPACE_FEATURES_1 = ['curr_input_x_embeddings',
 						'past_local_tdiff', 
 						'past_cloud_tdiff', 
 						'num_cloud_queries_left',  
-						'time_left']
+						'time_left',
+						'deadline']
 
 # This state space uses the vector difference between the 
 # SVM feature embeddings of the current input x_t and the 
@@ -27,7 +29,8 @@ STATE_SPACE_FEATURES_2 = ['curr_input_x_diff',
 						'past_local_tdiff', 
 						'past_cloud_tdiff', 
 						'num_cloud_queries_left',  
-						'time_left']
+						'time_left',
+						'deadline']
 
 # Includes the additional features:
 # 	- 'past_local_input_x_diff' which is the difference 
@@ -44,7 +47,18 @@ STATE_SPACE_FEATURES_3 = ['curr_input_x_diff',
 						'past_local_tdiff',
 						'past_cloud_tdiff',
 						'num_cloud_queries_left',
-						'time_left']
+						'time_left',
+						'deadline']
+
+# TODO: implement dynamics in step and reset for the other
+#		two state space types.
+CURR_STATE_SPACE_FEATURES = STATE_SPACE_FEATURES_1
+CURR_EPSIODE_LENGTH = 80
+CURR_NUM_CLOUD_QUERIES_LEFT = 20
+CURR_NUM_PREDICTION_LABELS = 10
+EMBEDDING_DIM = 128
+
+
 class OffloadEnv(gym.Env):
 	"""
 		Initialize the environment.
@@ -91,6 +105,62 @@ class OffloadEnv(gym.Env):
 
 		self.CLOUD_CONF = 1.0 # Cloud confidence is assumed to be 100%.
 
+		self.action_space = spaces.Discrete(self.n_a)
+
+		## State Space.
+		######################
+
+		# For the deadline distribution
+		# These values are equivalent to a distribution
+		# with a mean of 0.5 and standard deviation of 0.2236
+		self.d_alpha = 2
+		self.d_beta = 2
+
+		if CURR_STATE_SPACE_FEATURES == STATE_SPACE_FEATURES_1:
+			'''
+			self.observation_space = spaces.Dict({
+				'PHI(input_x): Embeddings': spaces.Box(low=-np.inf, high=np.inf, shape = (128,), dtype= np.float64),
+				'Past Local Prediction': spaces.Discrete(CURR_NUM_PREDICTION_LABELS),	# Range of the prediction space for dataset.
+				'Past Cloud Prediction': spaces.Discrete(CURR_NUM_PREDICTION_LABELS),
+				'Timesteps Since Last Local Query': spaces.Discrete(CURR_EPSIODE_LENGTH),
+				'Timesteps Since Last Cloud Query': spaces.Discrete(CURR_EPSIODE_LENGTH),
+				'Number of Cloud Model Queries Left': spaces.Discrete(CURR_NUM_CLOUD_QUERIES_LEFT),
+				'Timesteps Left': spaces.Discrete(CURR_EPSIODE_LENGTH)
+			})
+			'''
+			self.observation_space = spaces.Box(low=-float('inf'), high=float('inf'), shape=(128 + 1 + 1 + 1 + 1 + 1 + 1 + 1, ))
+		elif CURR_STATE_SPACE_FEATURES == STATE_SPACE_FEATURES_2:
+			'''
+			self.observation_space = spaces.Dict({
+				'PHI(input_x): Current Input Difference': spaces.Box(low=-np.inf, high=np.inf, shape = (1,), dtype= np.float64),
+				'Past Local Prediction': spaces.Discrete(CURR_NUM_PREDICTION_LABELS),	# Range of the prediction space for dataset.
+				'Past Cloud Prediction': spaces.Discrete(CURR_NUM_PREDICTION_LABELS),
+				'Timesteps Since Last Local Query': spaces.Discrete(CURR_EPSIODE_LENGTH),
+				'Timesteps Since Last Cloud Query': spaces.Discrete(CURR_EPSIODE_LENGTH),
+				'Number of Cloud Model Queries Left': spaces.Discrete(CURR_NUM_CLOUD_QUERIES_LEFT),
+				'Timesteps Left': spaces.Discrete(CURR_EPSIODE_LENGTH)
+			})
+			'''
+		elif CURR_STATE_SPACE_FEATURES == STATE_SPACE_FEATURES_3:
+			'''
+			self.observation_space = spaces.Dict({
+				'PHI(input_x)': spaces.Dict({
+					'Current Input Difference': spaces.Box(low=-np.inf, high=np.inf, shape = (1,), dtype= np.float64),
+					'Past Local Model Input Difference': spaces.Box(low=-np.inf, high=np.inf, shape = (1,), dtype= np.float64),
+					'Past Cloud Model Input Difference': spaces.Box(low=-np.inf, high=np.inf, shape = (1,), dtype= np.float64)
+				}),
+				'Past Local Prediction': spaces.Discrete(CURR_NUM_PREDICTION_LABELS),	# Range of the prediction space for dataset.
+				'Past Cloud Prediction': spaces.Discrete(CURR_NUM_PREDICTION_LABELS),
+				'Timesteps Since Last Local Query': spaces.Discrete(CURR_EPSIODE_LENGTH),
+				'Timesteps Since Last Cloud Query': spaces.Discrete(CURR_EPSIODE_LENGTH),
+				'Number of Cloud Model Queries Left': spaces.Discrete(CURR_NUM_CLOUD_QUERIES_LEFT),
+				'Timesteps Left': spaces.Discrete(CURR_EPSIODE_LENGTH)
+			})
+			'''
+		else:
+			# Should never get here. 
+			print("--- CURR_STATE_SPACE_FEATURES is ill defined ---")
+
 		## Seed.
 		#####################
 		self._seed = 22
@@ -134,6 +204,8 @@ class OffloadEnv(gym.Env):
 
 		self.state_dict['past_local_tdiff'] += 1
 		self.state_dict['past_cloud_tdiff'] += 1
+
+		self.state_dict['deadline'] = np.random.beta(self.d_alpha, self.d_beta)
 
 		# Return next state, reward, whether we are done, info dict.
 		next_state_vec = state_dict_to_state_vec(self.state_dict, self.CURR_STATE_SPACE_FEATURES)
@@ -204,15 +276,15 @@ class OffloadEnv(gym.Env):
 		else:
 			accuracy_cost = 1.0
 
-		reward = -1.0 * weight_of_accuracy_cost * accuracy_cost - weight_of_query_cost * query_cost 
+		reward = -1.0 * weight_of_accuracy_cost * accuracy_cost - weight_of_query_cost * query_cost - self.state_dict['deadline'] * query_cost
 		return reward
 
-	def reset(self, coherence_time=8, P_SEEN=0.6, T=80, STATE_SPACE_FEATURES=STATE_SPACE_FEATURES_1, train_test = 'TRAIN'):
+	def reset(self, coherence_time=8, P_SEEN=0.6, train_test = 'TRAIN'):
 		# Reset timestep.
 		self.t = 0
 
 		# Select the state space definition to use.
-		self.CURR_STATE_SPACE_FEATURES = STATE_SPACE_FEATURES
+		self.CURR_STATE_SPACE_FEATURES = CURR_STATE_SPACE_FEATURES
 
 		# Sample a new timeseries episode.
 		# timeseries is a dict containing all the relevant info
@@ -236,10 +308,10 @@ class OffloadEnv(gym.Env):
 		# - image_name_vec
 		# - train_test_membership
 		# - embeding_norm_vec
-		self.timeseries_dict = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, T=T, coherence_time=coherence_time, P_SEEN=P_SEEN, train_test_membership=train_test)
+		self.timeseries_dict = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, T=CURR_EPSIODE_LENGTH, coherence_time=coherence_time, P_SEEN=P_SEEN, train_test_membership=train_test)
 
 		# Budget of queries for cloud model.
-		self.num_cloud_queries_left = 10
+		self.num_cloud_queries_left = CURR_NUM_CLOUD_QUERIES_LEFT
 
 		# Max Timestep in the sampled timeseries
 		self.T = len(self.timeseries_dict['query_ts']) - 1
@@ -251,7 +323,9 @@ class OffloadEnv(gym.Env):
 											past_local_confidence=self.timeseries_dict['local_confidence_vec'][self.t],
 											past_cloud_predict=self.timeseries_dict['cloud_prediction_vec'][self.t],
 											num_cloud_queries_left=self.num_cloud_queries_left,
-											final_time_step=self.T)
+											final_time_step=self.T,
+											alpha=self.d_alpha,
+											beta=self.d_beta)
 
 		state = state_dict_to_state_vec(state_feature_list=self.CURR_STATE_SPACE_FEATURES, state_dict=self.state_dict)
 
@@ -273,8 +347,10 @@ def state_dict_to_state_vec(state_dict, state_feature_list):
             # All other state space features are numeric values.
             state_vec.append(state_dict[key])
 
+    return np.array(state_vec)
+
 def get_initial_state(curr_input_x_embeddings, past_local_predict, past_local_confidence, 
-                        past_cloud_predict, num_cloud_queries_left, final_time_step):
+                        past_cloud_predict, num_cloud_queries_left, final_time_step, alpha, beta):
     state_dict = {}
     
     # np.array of SVM embeddings for input x.
@@ -303,6 +379,9 @@ def get_initial_state(curr_input_x_embeddings, past_local_predict, past_local_co
 
     # General sensory information.
     state_dict['time_left'] = final_time_step - 1
+
+    # Deadline (% of time passed towards deadline)
+    state_dict['deadline'] = np.random.beta(alpha, beta)
 
     return state_dict
 
