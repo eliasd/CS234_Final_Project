@@ -163,7 +163,13 @@ class OffloadEnv(gym.Env):
 
 		## Seed.
 		#####################
+		# Default value
 		self._seed = 22
+
+		## Loss Logging.
+		#################
+		self.classification_error_avg = 0.0
+		self.query_cost_avg = 0.0
 
 	"""
 	 Implement dynamics: so given (s, a) return (s', reward, done, info).
@@ -188,6 +194,8 @@ class OffloadEnv(gym.Env):
 
 		done_flag = False
 		if self.t == self.T:
+			#print("---- AVERAGE CLASSIFICATION ERROR: {}".format(self.classification_error_avg))
+			#print("---- AVERAGE QUERY COST: {}".format(self.query_cost_avg))
 			done_flag = True
 
 		curr_input_x_embeddings = self.timeseries_dict['query_ts'][self.t]
@@ -262,6 +270,7 @@ class OffloadEnv(gym.Env):
 			self.state_dict['past_cloud_input_x'] = self.state_dict['curr_input_x_embeddings']
 			self.state_dict['past_cloud_tdiff'] = 0
 			self.state_dict['num_cloud_queries_left'] -= 1
+			self.num_cloud_queries_left -= 1
 
 	def computeReward(self, action_numeric, true_output_y):
 		weight_of_query_cost = self.rewards_params_dict['weight_of_query_cost'] = 1.0
@@ -276,12 +285,19 @@ class OffloadEnv(gym.Env):
 		else:
 			accuracy_cost = 1.0
 
+		self.classification_error_avg += accuracy_cost * (1.0 / self.T)
+		self.query_cost_avg += query_cost * (1.0 / self.T)
+
 		reward = -1.0 * weight_of_accuracy_cost * accuracy_cost - weight_of_query_cost * query_cost - self.state_dict['deadline'] * query_cost
 		return reward
 
 	def reset(self, coherence_time=8, P_SEEN=0.6, train_test = 'TRAIN'):
 		# Reset timestep.
 		self.t = 0
+
+		# Reset error logs.
+		self.classification_error_avg = 0.0
+		self.query_cost_avg = 0.0
 
 		# Select the state space definition to use.
 		self.CURR_STATE_SPACE_FEATURES = CURR_STATE_SPACE_FEATURES
@@ -311,7 +327,8 @@ class OffloadEnv(gym.Env):
 		self.timeseries_dict = facenet_stochastic_video(SVM_results_df=self.SVM_results_df, T=CURR_EPSIODE_LENGTH, coherence_time=coherence_time, P_SEEN=P_SEEN, train_test_membership=train_test)
 
 		# Budget of queries for cloud model.
-		self.num_cloud_queries_left = CURR_NUM_CLOUD_QUERIES_LEFT
+		self.query_budget_frac = np.random.choice([0.10, 0.20, 0.50, 0.70, 1.0])
+		self.num_cloud_queries_left = int(len(self.timeseries_dict['query_ts']) * self.query_budget_frac)
 
 		# Max Timestep in the sampled timeseries
 		self.T = len(self.timeseries_dict['query_ts']) - 1
@@ -330,6 +347,9 @@ class OffloadEnv(gym.Env):
 		state = state_dict_to_state_vec(state_feature_list=self.CURR_STATE_SPACE_FEATURES, state_dict=self.state_dict)
 
 		return state
+
+	def render(self):
+		pass
 
 
 ## Utils Functions:
