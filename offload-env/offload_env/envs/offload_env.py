@@ -170,6 +170,7 @@ class OffloadEnv(gym.Env):
 		#################
 		self.classification_error_avg = 0.0
 		self.query_cost_avg = 0.0
+		self.episode = 0
 
 	"""
 	 Implement dynamics: so given (s, a) return (s', reward, done, info).
@@ -177,6 +178,7 @@ class OffloadEnv(gym.Env):
 	"""
 	def step(self, action):
 		nominal_action_name = self.numeric_to_action_dict[action]
+
 		allowed_action_name = self.get_action_name(nominal_action_name)
 		# Get numeric value of action we're allowed to take
 		allowed_action_numeric = self.action_to_numeric_dict[allowed_action_name]
@@ -193,9 +195,19 @@ class OffloadEnv(gym.Env):
 		self.state_dict['time_left'] -= 1
 
 		done_flag = False
+		info = {}
 		if self.t == self.T:
-			#print("---- AVERAGE CLASSIFICATION ERROR: {}".format(self.classification_error_avg))
-			#print("---- AVERAGE QUERY COST: {}".format(self.query_cost_avg))
+			info = {}
+			info['action_taken_dict'] = self.action_taken_dict
+			info['classification_error_total'] = self.classification_error_total
+			info['query_cost_total'] = self.query_cost_total
+			if self.episode < 10:
+				print_str = 'action_taken_dict EP0{}: past_local {} past_cloud {} query_local {} query_cloud {} classification_error_total {} query_cost_total {}'.format(self.episode, self.action_taken_dict['past_local'], self.action_taken_dict['past_cloud'], self.action_taken_dict['query_local'], self.action_taken_dict['query_cloud'], self.classification_error_total, self.query_cost_total)
+				print(print_str)
+			else:
+				print_str = 'action_taken_dict EP{}: past_local {} past_cloud {} query_local {} query_cloud {} classification_error_total {} query_cost_total {}'.format(self.episode, self.action_taken_dict['past_local'], self.action_taken_dict['past_cloud'], self.action_taken_dict['query_local'], self.action_taken_dict['query_cloud'], self.classification_error_total, self.query_cost_total)
+				print(print_str)
+			self.episode += 1
 			done_flag = True
 
 		curr_input_x_embeddings = self.timeseries_dict['query_ts'][self.t]
@@ -217,10 +229,13 @@ class OffloadEnv(gym.Env):
 
 		# Return next state, reward, whether we are done, info dict.
 		next_state_vec = state_dict_to_state_vec(self.state_dict, self.CURR_STATE_SPACE_FEATURES)
-		return next_state_vec, reward, done_flag, {}
+		return next_state_vec, reward, done_flag, info
 
 	def get_action_name(self, nominal_action_name):
 		action_name = nominal_action_name
+
+		# Logging the current action taken.
+		self.action_taken_dict[action_name] += 1
 
 		if self.num_cloud_queries_left <= 0:
 			if action_name == 'query_cloud':
@@ -285,19 +300,27 @@ class OffloadEnv(gym.Env):
 		else:
 			accuracy_cost = 1.0
 
-		self.classification_error_avg += accuracy_cost * (1.0 / self.T)
-		self.query_cost_avg += query_cost * (1.0 / self.T)
+		# Logging running classification error and query cost.
+		self.classification_error_total += -1.0 * accuracy_cost
+		self.query_cost_total += -1.0 * query_cost
 
 		reward = -1.0 * weight_of_accuracy_cost * accuracy_cost - weight_of_query_cost * query_cost - self.state_dict['deadline'] * query_cost
 		return reward
 
-	def reset(self, coherence_time=8, P_SEEN=0.6, train_test = 'TRAIN'):
+	def reset(self, coherence_time=8, P_SEEN=0.6, train_test = 'TEST'):
 		# Reset timestep.
 		self.t = 0
 
-		# Reset error logs.
-		self.classification_error_avg = 0.0
-		self.query_cost_avg = 0.0
+		# Reset classification error + query cost logs.
+		self.classification_error_total = 0.0
+		self.query_cost_total = 0.0
+
+		# Reset action taken logs.
+		self.action_taken_dict = {}
+		self.action_taken_dict['past_local'] = 0
+		self.action_taken_dict['past_cloud'] = 0
+		self.action_taken_dict['query_local'] = 0
+		self.action_taken_dict['query_cloud'] = 0
 
 		# Select the state space definition to use.
 		self.CURR_STATE_SPACE_FEATURES = CURR_STATE_SPACE_FEATURES
@@ -480,7 +503,7 @@ def facenet_stochastic_video(SVM_results_df = None, T = 200, coherence_time = 10
     seen_vec = []
     rolling_diff_vec = []
     image_name_vec = []
-    train_test_membership_vec = []
+    train_test_membership_vec = []	
     embedding_norm_vec = []
 
     np.random.seed(seed)
