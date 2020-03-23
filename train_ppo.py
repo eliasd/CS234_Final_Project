@@ -20,7 +20,7 @@ def run_experiment(args):
     eg.add('save_freq', 20)
     eg.add('ac_kwargs:hidden_sizes', [(32,), (64,64)], 'hid')
     eg.add('ac_kwargs:activation', [tf.tanh, tf.nn.relu], '')
-    eg.run(vpg, num_cpu=args.cpu)
+    eg.run(ppo, num_cpu=args.cpu)
 
 if __name__ == '__main__':
     import argparse
